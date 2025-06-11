@@ -93,7 +93,7 @@ private:
     
     static constexpr std::array<std::pair<const char*, const char*>, 2> kJetRadii {{
         {"r03", "AntiKt_unsubtracted_r03"},
-        {"r06", "AntiKt_unsubtracted_r06"}
+        {"r05", "AntiKt_unsubtracted_r05"}
     }};
     
     bool   verbose = true;
