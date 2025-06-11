@@ -25,11 +25,12 @@ runNumber="$1"
 fileList="$2"
 clusterID="${3:-0}"
 
-# ---------------- environment ------------------------------------------------
+set +u
+export PGHOST=localhost
 source /opt/sphenix/core/bin/sphenix_setup.sh -n
-source /opt/sphenix/core/bin/setup_local.sh "${MYINSTALL}"
-export ROOT_INCLUDE_PATH=$ROOT_INCLUDE_PATH:"${MYINSTALL}/include"
-# -----------------------------------------------------------------------------
+export PGHOST=localhost         # restore after the script unsets it
+set -u
+source /opt/sphenix/core/bin/setup_local.sh "${HOME}/install"
 
 # ---------------- output -----------------------------------------------------
 outDir="${SCRATCH}/output/${runNumber}"

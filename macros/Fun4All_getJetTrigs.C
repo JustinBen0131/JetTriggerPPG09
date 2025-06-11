@@ -8,7 +8,7 @@
 #include <ffamodules/CDBInterface.h>
 #include <fun4all/Fun4AllDstOutputManager.h>
 #include <fun4all/Fun4AllOutputManager.h>
-
+#include <calotrigger/TriggerRunInfoReco.h>
 #include <caloreco/CaloTowerStatus.h>
 
 #include <phool/recoConsts.h>
@@ -32,7 +32,7 @@
 #include "/sphenix/user/patsfan753/tutorials/tutorials/CaloDataAnaRun24pp/clusterIsoCopy_src/ClusterIso.h"
 
 #include <calotreegen/caloTreeGen.h>
-
+#include "/sphenix/u/patsfan753/scratch/TriggerAnalysis/src/JetTriggerPlotter.h"
 #include <Calo_Calib.C>
 
 R__LOAD_LIBRARY(libfun4all.so)
@@ -43,7 +43,7 @@ R__LOAD_LIBRARY(libjetbackground.so)
 R__LOAD_LIBRARY(libg4jets.so)
 R__LOAD_LIBRARY(libjetbase.so)
 R__LOAD_LIBRARY(libcalotrigger.so)
-R__LOAD_LIBRARY(/sphenix/user/patsfan753/install/lib/libclusteriso.so)
+R__LOAD_LIBRARY(/sphenix/user/patsfan753/install/lib/libTrigger.so)
 
 
 static const bool WANT_VERBOSE = false;
@@ -106,14 +106,14 @@ void Fun4All_getJetTrigs(const int nEvents = 0,
     
     
     
-    auto* trigAna = new TriggerAnalyzer("trigQA.root");
-    trigAna->setVzCut(30.0);
-    trigAna->enableVzCut();    // (re)enable – default true
+    auto* jetPlotter = new JetTriggerPlotter();   // now matches header
+    jetPlotter->setVzCut(30.0);
+    jetPlotter->enableVzCut();    // (re)enable – default true
     // trigAna->enableVzCut(false);  // disable the cut completely
-    se->registerSubsystem(trigAna);
+    se->registerSubsystem(jetPlotter);
     
     TriggerRunInfoReco *triggerruninforeco = new TriggerRunInfoReco();
-    se->registerSubsystem(triggerruninforeco);å
+    se->registerSubsystem(triggerruninforeco);
 
     Fun4AllInputManager *in = new Fun4AllDstInputManager("DSTjet");
 
@@ -146,3 +146,5 @@ void Fun4All_getJetTrigs(const int nEvents = 0,
     gSystem->Exit(0);
 }
 
+
+#endif
