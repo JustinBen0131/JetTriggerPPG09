@@ -107,6 +107,7 @@ void Fun4All_getJetTrigs(const int nEvents = 0,
     auto* jetPlotter = new JetTriggerPlotter();   // now matches header
     jetPlotter->setVzCut(30.0);
     jetPlotter->enableVzCut();    // (re)enable – default true
+    jetPlotter->setVerbose(false);
     // trigAna->enableVzCut(false);  // disable the cut completely
     se->registerSubsystem(jetPlotter);
     
