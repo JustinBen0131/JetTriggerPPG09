@@ -57,8 +57,6 @@ void Fun4All_getJetTrigs(const int nEvents = 0,
     if (WANT_VERBOSE) {
         std::cout << "[DEBUG] Fun4AllServer instance acquired: " << se << std::endl;
     }
-    
-
     gSystem->Load("libg4dst");
     
     // Basic run config
@@ -113,6 +111,7 @@ void Fun4All_getJetTrigs(const int nEvents = 0,
     se->registerSubsystem(jetPlotter);
     
     TriggerRunInfoReco *triggerruninforeco = new TriggerRunInfoReco();
+    triggerruninforeco->Verbosity(0);
     se->registerSubsystem(triggerruninforeco);
 
     Fun4AllInputManager *in = new Fun4AllDstInputManager("DSTjet");
