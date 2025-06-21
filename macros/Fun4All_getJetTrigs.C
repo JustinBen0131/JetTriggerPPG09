@@ -104,7 +104,7 @@ void Fun4All_getJetTrigs(const int nEvents = 0,
     
     
     
-    auto* jetPlotter = new JetTriggerPlotter();   // now matches header
+    auto* jetPlotter = new JetTriggerPlotter(inName);    // writes to rootOut
     jetPlotter->setVzCut(30.0);
     jetPlotter->enableVzCut();    // (re)enable – default true
     jetPlotter->setVerbose(false);
