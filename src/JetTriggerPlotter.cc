@@ -76,13 +76,27 @@
 #define ANSI_COLOR_RESET "\033[0m"
 
 
-//____________________________________________________________________________..
-JetTriggerPlotter::JetTriggerPlotter(const std::string &dataOutFile)
+//____________________________________________________________________________
+JetTriggerPlotter::JetTriggerPlotter(const std::string& dataOutFile)
   : SubsysReco("JetTriggerPlotter")
   , Outfile(dataOutFile)
 {
-  std::cout << "[DEBUG] JetTriggerPlotter::JetTriggerPlotter() constructor called." << std::endl;
-  std::cout << "    Data output will go to: " << Outfile << std::endl;
+  // ------------------------------------------------------------------
+  // Basic sanity‑check: the caller must supply a non‑empty filename.
+  // Abort early if they forgot to pass one.
+  // ------------------------------------------------------------------
+  if (Outfile.empty())
+  {
+    std::cerr << "\n[ERROR] JetTriggerPlotter constructed with an empty "
+                 "output‑file name!\n"
+                 "        You must pass the desired .root path, e.g.\n"
+                 "        new JetTriggerPlotter(\"/path/to/file.root\");\n"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
+  std::cout << "[DEBUG] JetTriggerPlotter::JetTriggerPlotter() ctor called\n"
+            << "        Data output will go to: " << Outfile << std::endl;
 }
 
 //____________________________________________________________________________..
