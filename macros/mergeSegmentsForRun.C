@@ -1,496 +1,325 @@
+//////////////////////////////////////////////////////////////////////////////
+// Run‑by‑run segment merger + scaler for JetTriggerPlotter output
+// --------------------------------------------------------------------------
+//   • Input   : /sphenix/tg/tg01/bulk/jbennett/TriggerAna/<run>/*.root
+//               (or flat files TriggerAna_<run>_segXXX.root in the same dir)
+//   • Per run : merge  →  scale  →  TriggerAna_<run>.root
+//   • Final   : hadd all per‑run files → TriggerAnaFinal.root
+//
+// Histogram‑scaling rules
+//   scale TH1 whose names start with  h_leadingJetET
+//     ─ but skip if directory == "COMBINED"      or  name contains "doNotScale"
+//
+//////////////////////////////////////////////////////////////////////////////
+
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <vector>
 #include <map>
-#include <fstream>
-#include <cstdlib>
-#include <cstdio>
+#include <set>
+#include <algorithm>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <algorithm>
+#include <cstdio>
+#include <memory>
 
-// ROOT
+// ── ROOT -------------------------------------------------------------------
 #include <TSystem.h>
 #include <TFile.h>
-#include <TKey.h>
 #include <TDirectory.h>
 #include <TH1.h>
+#include <TKey.h>
 #include <TFileMerger.h>
 #include <TSQLServer.h>
 #include <TSQLResult.h>
 #include <TSQLRow.h>
 
-// ANSI Color Macros
-#define ANSI_RESET  "\x1b[0m"
-#define ANSI_RED    "\x1b[31m"
-#define ANSI_GREEN  "\x1b[32m"
-#define ANSI_YELLOW "\x1b[33m"
-#define ANSI_CYAN   "\x1b[36m"
+// ── Colours ---------------------------------------------------------------
+#define C_RST  "\033[0m"
+#define C_RED  "\033[31m"
+#define C_GRN  "\033[32m"
+#define C_YEL  "\033[33m"
+#define C_CYN  "\033[36m"
+#define C_BLU  "\033[34m"
 
-// ------------------------------------------------------------------------
-// 1) Validate a ROOT file by reading all objects
-// ------------------------------------------------------------------------
-bool validate_root_file(const std::string &filename)
+// ── Global verbosity switch -----------------------------------------------
+static const bool VERBOSE = true;
+#define vout if(VERBOSE) std::cout
+#define verr if(VERBOSE) std::cerr
+
+// ── Helpers ----------------------------------------------------------------
+static bool isDirectory(const std::string& p)
 {
-    TFile *f = TFile::Open(filename.c_str(), "READ");
-    if (!f || f->IsZombie())
-    {
-        std::cerr << ANSI_RED << "[ERROR] Cannot open file for validation: "
-                  << filename << ANSI_RESET << std::endl;
-        if (f) { f->Close(); delete f; }
-        return false;
-    }
-
-    bool isValid = true;
-    TIter nextkey(f->GetListOfKeys());
-    TKey* key;
-    while ((key = (TKey*)nextkey()))
-    {
-        TObject* obj = nullptr;
-        try {
-            obj = key->ReadObj();
-            if (!obj)
-            {
-                std::cerr << ANSI_RED << "[ERROR] Failed to read object: "
-                          << key->GetName() << ANSI_RESET << std::endl;
-                isValid = false;
-                continue;
-            }
-            // example check: negative integrals for TH1
-            if (obj->InheritsFrom("TH1"))
-            {
-                TH1 *h = (TH1*)obj;
-                if (h->Integral() < 0)
-                {
-                    std::cerr << ANSI_RED << "[ERROR] Negative integral in hist: "
-                              << h->GetName() << ANSI_RESET << std::endl;
-                    isValid = false;
-                }
-            }
-            delete obj;
-        }
-        catch(const std::exception &e) {
-            std::cerr << ANSI_RED << "[EXCEPTION] While reading " << key->GetName()
-                      << ": " << e.what() << ANSI_RESET << std::endl;
-            isValid = false;
-            if (obj) delete obj;
-        }
-    }
-
-    f->Close();
-    delete f;
-
-    if (isValid) {
-        std::cout << ANSI_GREEN << "[INFO] File validation successful: "
-                  << filename << ANSI_RESET << std::endl;
-    } else {
-        std::cerr << ANSI_RED << "[ERROR] File validation failed: "
-                  << filename << ANSI_RESET << std::endl;
-    }
-
-    return isValid;
+  struct stat st{};
+  return ::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-// ------------------------------------------------------------------------
-// 2) Hard-coded map from DB trigger names => folder/histogram directory
-// ------------------------------------------------------------------------
-static std::map<std::string, std::string> g_dbNameToFolderName = {
-    {"MBD N&S >= 1",               "MBD_NandS_geq_1"},
-    {"Jet 8 GeV + MBD NS >= 1",    "Jet_8_GeV_plus_MBD_NS_geq_1"},
-    {"Jet 10 GeV + MBD NS >= 1",   "Jet_10_GeV_plus_MBD_NS_geq_1"},
-    {"Jet 12 GeV + MBD NS >= 1",   "Jet_12_GeV_plus_MBD_NS_geq_1"}
+// ── 1) FAST sanity check of a ROOT file ------------------------------------
+static bool validateRoot(const std::string& fn)
+{
+  std::unique_ptr<TFile> f(TFile::Open(fn.c_str(), "READ"));
+  if(!f || f->IsZombie()){
+    std::cerr<<C_RED<<"[ERROR] cannot open "<<fn<<C_RST<<"\n"; return false;
+  }
+  bool ok=true;
+  TIter next(f->GetListOfKeys());
+  while(auto* k = static_cast<TKey*>(next()))
+  {
+    std::unique_ptr<TObject> o(k->ReadObj());
+    if(!o){ ok=false; continue; }
+    if(o->InheritsFrom("TH1") && static_cast<TH1*>(o.get())->Integral()<0) ok=false;
+  }
+  if(!ok) std::cerr<<C_RED<<"[ERROR] validation failed "<<fn<<C_RST<<"\n";
+  return ok;
+}
+
+// ── 2) DB‑name → JetTriggerPlotter directory -------------------------------
+static const std::map<std::string,std::string> g_trigMap = {
+  {"MBD N&S >= 1",               "MBD_NandS_geq_1"},
+  {"Jet 8 GeV + MBD NS >= 1",    "Jet_8_GeV_plus_MBD_NS_geq_1"},
+  {"Jet 10 GeV + MBD NS >= 1",   "Jet_10_GeV_plus_MBD_NS_geq_1"},
+  {"Jet 12 GeV + MBD NS >= 1",   "Jet_12_GeV_plus_MBD_NS_geq_1"}
 };
 
-// ------------------------------------------------------------------------
-// 3) Query DB for scale factors => (folderName -> scaleValue)
-// ------------------------------------------------------------------------
-void getTriggerScaleFactorsFromDB(int runNumber, std::map<std::string, double> &folderScaleMap)
+// ── 3) Fetch live / scaled → scale factor ----------------------------------
+static bool fetchScaleMap(int run, std::map<std::string,double>& fac)
 {
-    folderScaleMap.clear();
-    TSQLServer* db = TSQLServer::Connect("pgsql://sphnxdaqdbreplica:5432/daq","phnxro","");
-    if (!db || db->IsZombie())
-    {
-        std::cerr << ANSI_RED << "[ERROR] DB connection failed for run "
-                  << runNumber << ANSI_RESET << std::endl;
-        if (db) delete db;
-        return;
-    }
-    std::cout << "[DB INFO] " << db->ServerInfo() << std::endl;
+  fac.clear();
+  std::unique_ptr<TSQLServer> db(
+      TSQLServer::Connect("pgsql://sphnxdaqdbreplica:5432/daq","phnxro",""));
+  if(!db || db->IsZombie()){
+    std::cerr<<C_RED<<"[ERROR] DB connect failed"<<C_RST<<"\n"; return false;
+  }
 
-    char query[512];
-    snprintf(query, sizeof(query),
-             "SELECT s.index, t.triggername, s.live, s.scaled "
-             "FROM gl1_scalers s "
-             "JOIN gl1_triggernames t ON (s.index = t.index AND s.runnumber BETWEEN t.runnumber AND t.runnumber_last) "
-             "WHERE s.runnumber=%d ORDER BY s.index;", runNumber);
+  char q[512];
+  snprintf(q,sizeof(q),
+           "SELECT t.triggername, s.live, s.scaled "
+           "FROM gl1_scalers s "
+           "JOIN gl1_triggernames t ON "
+           "(s.index=t.index AND s.runnumber BETWEEN t.runnumber AND t.runnumber_last) "
+           "WHERE s.runnumber=%d;", run);
 
-    auto *res = db->Query(query);
-    if (!res)
-    {
-        std::cerr << ANSI_RED << "[ERROR] Query failed for run "
-                  << runNumber << ANSI_RESET << std::endl;
-        delete db;
-        return;
-    }
+  std::unique_ptr<TSQLResult> res(db->Query(q));
+  if(!res){ std::cerr<<C_RED<<"[ERROR] query failed"<<C_RST<<"\n"; return false; }
 
-    while (auto row = res->Next())
-    {
-        const char* dbTrig = row->GetField(1);
-        const char* liveStr = row->GetField(2);
-        const char* scaledStr = row->GetField(3);
-        if (!dbTrig || !liveStr || !scaledStr) { delete row; continue; }
+  while(auto* row=res->Next())
+  {
+    std::string dbName = row->GetField(0);
+    double live   = std::atof(row->GetField(1));
+    double scaled = std::atof(row->GetField(2));
+    delete row;
 
-        std::string trigName(dbTrig);
-        double live   = std::atof(liveStr);
-        double scaled = std::atof(scaledStr);
+    auto it = g_trigMap.find(dbName);
+    if(it==g_trigMap.end()) continue;
+    fac[it->second] = (scaled>0) ? live/scaled : -1.;
+  }
 
-        // check map
-        auto it = g_dbNameToFolderName.find(trigName);
-        if (it == g_dbNameToFolderName.end())
-        {
-            // skip unknown triggers
-            delete row;
-            continue;
-        }
-
-        std::string folderName = it->second;
-        double scaleVal = (scaled>0) ? (live/scaled) : -1;
-        folderScaleMap[folderName] = scaleVal;
-
-        delete row;
-    }
-
-    delete res; delete db;
-
-    // debug
-    std::cout << "[DEBUG] scale factors for run " << runNumber << ":\n";
-    for (auto &p : folderScaleMap)
-    {
-        std::cout << "   folder='" << p.first
-                  << "' scale=" << p.second << "\n";
-    }
+  vout<<C_CYN<<"┌─ scale factors for run "<<run<<" ─────────────┐"<<C_RST<<"\n";
+  for(auto& kv:fac)
+    vout<<"│  "<<std::setw(35)<<std::left<<kv.first<<"  : "
+        <<std::setw(8)<<std::right<<kv.second<<" │\n";
+  vout<<C_CYN<<"└──────────────────────────────────────────────┘"<<C_RST<<"\n";
+  return true;
 }
 
-// ------------------------------------------------------------------------
-// 4) Scale a single histogram in memory
-// ------------------------------------------------------------------------
-int scaleHistogram(TH1 *hist, double factor, const std::string &folder)
+// ── 4) scale candidate histograms ------------------------------------------
+static void applyScale(TH1* h,const std::string& dir,
+                       const std::map<std::string,double>& fac,
+                       unsigned depth)
 {
-    if (!hist)
-    {
-        std::cerr << ANSI_RED << "[ERROR] Null histogram in " << folder << ANSI_RESET << std::endl;
-        return -1;
-    }
+  if(!h) return;
+  const std::string n = h->GetName();
+  const std::string indent(depth*2,' ');
+  std::string flag  = " ";
 
-    double integral = hist->Integral();
-    if (integral==0)
-    {
-        std::cout << ANSI_CYAN << "[SKIP] " << hist->GetName()
-                  << " in " << folder << ": zero content." << ANSI_RESET << std::endl;
-        return 1;
-    }
-    if (factor<=0)
-    {
-        std::cout << ANSI_CYAN << "[SKIP] " << hist->GetName()
-                  << " in " << folder << ": factor<=0 => trigger off." << ANSI_RESET << std::endl;
-        return 2;
-    }
+  if(dir=="COMBINED" || n.find("doNotScale")!=std::string::npos ||
+     n.rfind("h_leadingJetET",0)!=0)
+  {
+    vout<<indent<<"└─ "<<n<<"  ("<<h->GetEntries()<<" entries – kept)\n";
+    return;
+  }
 
-    hist->Scale(factor);
-    std::cout << ANSI_YELLOW << "[SCALE] " << hist->GetName()
-              << " in " << folder
-              << " by " << factor << ANSI_RESET << std::endl;
-    return 0;
+  auto it = fac.find(dir);
+  if(it==fac.end() || it->second<=0){
+    vout<<indent<<"└─ "<<n<<"  ("<<h->GetEntries()<<" entries – "<<C_YEL<<"NO SCALE"<<C_RST<<")\n";
+    return;
+  }
+
+  h->Scale(it->second);
+  vout<<indent<<"└─ "<<n<<"  ("<<h->GetEntries()
+      <<" entries, "<<C_YEL<<"×"<<it->second<<C_RST<<")\n";
 }
 
-void copyAndScaleDirectory(TDirectory *sourceDir,
-                           TDirectory *destDir,
-                           const std::map<std::string, double> &folderScaleMap)
+// ── 5) deep copy with per‑object logging -----------------------------------
+static void copyDir(TDirectory* src,TDirectory* dst,
+                    const std::map<std::string,double>& fac,
+                    unsigned depth=0,
+                    std::map<std::string,int>* dirWritten=nullptr)
 {
-    sourceDir->cd();
-    TList *keys = sourceDir->GetListOfKeys();
-    if (!keys) return;
+  src->cd();
+  TIter next(src->GetListOfKeys());
+  while(auto* k=static_cast<TKey*>(next()))
+  {
+    std::unique_ptr<TObject> obj(k->ReadObj());
+    if(!obj) continue;
 
-    destDir->cd();
-
-    TIter nextkey(keys);
-    TKey *key;
-    while ((key = (TKey*)nextkey()))
+    dst->cd();
+    const std::string indent(depth*2,' ');
+    if(obj->InheritsFrom("TDirectory"))
     {
-        // read object from source
-        TObject* obj = key->ReadObj();
-        if (!obj) continue;
-
-        if (obj->InheritsFrom("TDirectory"))
-        {
-            // Recursively handle subdirectories
-            TDirectory* subSrc = (TDirectory*)obj;
-            std::string dname = subSrc->GetName();
-
-            TDirectory* subDest = destDir->mkdir(dname.c_str());
-            copyAndScaleDirectory(subSrc, subDest, folderScaleMap);
-        }
-        else if (obj->InheritsFrom("TH1"))
-        {
-            TH1* h = static_cast<TH1*>(obj);
-            // The name of the directory we’re copying from
-            std::string parentName(sourceDir->GetName());
-            // The name of the histogram
-            std::string hName(h->GetName());
-
-            // We skip scaling in these two cases:
-            //  1) This is the 'COMBINED' directory.
-            //  2) The histogram's name contains "doNotScale".
-            bool skipScaling = (parentName == "COMBINED")
-                               || (hName.find("doNotScale") != std::string::npos);
-
-            if (!skipScaling)
-            {
-                // If not skipping => see if we have a scale factor
-                auto it = folderScaleMap.find(parentName);
-                if (it != folderScaleMap.end())
-                {
-                    double fac = it->second;
-                    // scale the histogram
-                    scaleHistogram(h, fac, parentName);
-                }
-            }
-            else
-            {
-                // debug message if you want
-                std::cout << "[INFO] Skipping scale for histogram '"
-                          << hName << "' in folder '"
-                          << parentName << "'\n";
-            }
-
-            // Now write the histogram to destination
-            destDir->cd();
-            h->Write(h->GetName(), TObject::kOverwrite);
-        }
-        else
-        {
-            // Non-TH1 objects => directly write
-            destDir->cd();
-            obj->Write(obj->GetName(), TObject::kOverwrite);
-        }
-        delete obj;
+      auto* sdir=static_cast<TDirectory*>(obj.get());
+      auto* ddir=dst->mkdir(sdir->GetName());
+      vout<<indent<<C_BLU<<sdir->GetName()<<"/"<<C_RST<<"\n";
+      copyDir(sdir,ddir,fac,depth+1,dirWritten);
     }
+    else if(obj->InheritsFrom("TH1"))
+    {
+      applyScale(static_cast<TH1*>(obj.get()),src->GetName(),fac,depth);
+      obj->Write(obj->GetName(),TObject::kOverwrite);
+      if(dirWritten) (*dirWritten)[src->GetName()]++;
+    }
+    else
+    {
+      vout<<indent<<"└─ "<<obj->GetName()<<" (non‑TH1)\n";
+      obj->Write(obj->GetName(),TObject::kOverwrite);
+      if(dirWritten) (*dirWritten)[src->GetName()]++;
+    }
+  }
 }
 
-
-// ------------------------------------------------------------------------
-// 6) Merge all input files => "merged_tmp.root" with TFileMerger ("RECREATE")
-// ------------------------------------------------------------------------
-bool doSegmentMerge(const std::vector<std::string> &validRootFiles,
-                    const std::string &outMergedFile)
+// ── 6) process one run ------------------------------------------------------
+static bool handleRun(int run,
+                      const std::string& inDir,
+                      const std::string& outDir)
 {
-    std::cout << "[INFO] Merging segments into " << outMergedFile << std::endl;
+  const std::string rStr = std::to_string(run);
 
-    // remove if exists
-    gSystem->Unlink(outMergedFile.c_str());
-
-    TFileMerger merger;
-    // "RECREATE" => brand-new file, ensures no leftover partial keys
-    merger.OutputFile(outMergedFile.c_str(), "RECREATE");
-
-    for (auto &f : validRootFiles)
-    {
-        bool ok = merger.AddFile(f.c_str());
-        if (!ok)
-        {
-            std::cerr << ANSI_RED << "[ERROR] TFileMerger failed to add "
-                      << f << ANSI_RESET << std::endl;
-            return false;
-        }
+  // ─ collect segments
+  std::vector<std::string> segs;
+  std::string sub = inDir + "/" + rStr;
+  if(isDirectory(sub)){
+    DIR* d=opendir(sub.c_str());
+    while(auto* e=readdir(d)){
+      std::string n=e->d_name;
+      if(n.size()>5 && n.substr(n.size()-5)==".root") segs.emplace_back(sub+"/"+n);
     }
-
-    bool mergeRes = merger.Merge();
-    if (!mergeRes)
-    {
-        std::cerr << ANSI_RED << "[ERROR] TFileMerger.Merge() failed for "
-                  << outMergedFile << ANSI_RESET << std::endl;
-        return false;
+    closedir(d);
+  }else{
+    DIR* d=opendir(inDir.c_str());
+    const std::string pat = "TriggerAna_" + rStr + "_";
+    while(auto* e=readdir(d)){
+      std::string n=e->d_name;
+      if(n.find(pat)==0 && n.substr(n.size()-5)==".root") segs.emplace_back(inDir+"/"+n);
     }
+    closedir(d);
+  }
+  if(segs.empty()){
+    std::cerr<<C_RED<<"[ERROR] run "<<run<<" : no segments"<<C_RST<<"\n";
+    return false;
+  }
+  std::sort(segs.begin(), segs.end());
 
-    // validate the merged result
-    bool good = validate_root_file(outMergedFile);
-    if (!good)
-    {
-        std::cerr << ANSI_RED << "[ERROR] Merged file " << outMergedFile
-                  << " is invalid." << ANSI_RESET << std::endl;
-        return false;
-    }
+  vout<<C_CYN<<"┌─ merging "<<segs.size()<<" segments"<<C_RST<<"\n";
 
-    return true;
+  // ─ names
+  const std::string merged = outDir + "/tmp_" + rStr + "_merge.root";
+  const std::string scaled = outDir + "/tmp_" + rStr + "_scale.root";
+  const std::string final  = outDir + "/TriggerAna_" + rStr + ".root";
+
+  // ─ merge
+  TFileMerger fm; fm.OutputFile(merged.c_str(),"RECREATE");
+  for(auto& f:segs) fm.AddFile(f.c_str());
+  if(!fm.Merge() || !validateRoot(merged)){ gSystem->Unlink(merged.c_str()); return false; }
+
+  // ─ scale
+  std::map<std::string,double> fac;
+  if(!fetchScaleMap(run,fac)){ gSystem->Unlink(merged.c_str()); return false; }
+
+  std::unique_ptr<TFile> fin(TFile::Open(merged.c_str(),"READ"));
+  std::unique_ptr<TFile> fout(TFile::Open(scaled.c_str(),"RECREATE"));
+  if(!fin || fin->IsZombie() || !fout || fout->IsZombie()){
+    std::cerr<<C_RED<<"[ERROR] cannot open tmp files"<<C_RST<<"\n";
+    return false;
+  }
+
+  std::map<std::string,int> writtenPerDir;
+  copyDir(fin.get(),fout.get(),fac,0,&writtenPerDir);
+  fout->Write(); fout->Close(); fin->Close();
+
+  // ─ summary table
+  vout<<C_CYN<<"┌─ objects written"<<C_RST<<"\n";
+  for(auto& kv:writtenPerDir)
+    vout<<"│  "<<std::setw(35)<<std::left<<kv.first<<" : "
+        <<std::setw(6)<<kv.second<<"\n";
+  vout<<C_CYN<<"└──────────────────"<<C_RST<<"\n";
+
+  if(!validateRoot(scaled)){
+    gSystem->Unlink(merged.c_str()); gSystem->Unlink(scaled.c_str()); return false;
+  }
+
+  // move into place
+  if(std::rename(scaled.c_str(), final.c_str())!=0){
+    perror("rename"); return false;
+  }
+  gSystem->Unlink(merged.c_str());
+  std::cout<<C_GRN<<"[OK] "<<final<<C_RST<<"\n";
+  return true;
 }
 
-// ------------------------------------------------------------------------
-// 7) Scale the merged file => produce "scaled_tmp.root", brand new
-//    then rename to final if valid
-// ------------------------------------------------------------------------
-bool scaleMergedFile(const std::string &mergedFile,
-                     const std::string &scaledFile,
-                     int runNumber)
+// ── 7) Driver ---------------------------------------------------------------
+static int driver()
 {
-    // remove if exists
-    gSystem->Unlink(scaledFile.c_str());
+  const std::string inDir  = "/sphenix/tg/tg01/bulk/jbennett/TriggerAna";
+  const std::string outDir = "/sphenix/u/patsfan753/scratch/TriggerAnalysis/output";
+  gSystem->mkdir(outDir.c_str(), true);
 
-    // read scale factors
-    std::map<std::string,double> folderScaleMap;
-    getTriggerScaleFactorsFromDB(runNumber, folderScaleMap);
-
-    // open input read-only
-    TFile *fin = TFile::Open(mergedFile.c_str(), "READ");
-    if (!fin || fin->IsZombie())
-    {
-        std::cerr << ANSI_RED << "[ERROR] cannot open merged file "
-                  << mergedFile << ANSI_RESET << std::endl;
-        if (fin) { fin->Close(); delete fin; }
-        return false;
+  // discover runs
+  std::set<int> runs;
+  DIR* d=opendir(inDir.c_str());
+  if(!d){ std::cerr<<C_RED<<"[FATAL] cannot open "<<inDir<<C_RST<<"\n"; return 2; }
+  while(auto* e=readdir(d)){
+    std::string n=e->d_name;
+    if(std::all_of(n.begin(), n.end(), ::isdigit)) runs.insert(std::stoi(n));
+    else if(n.find("TriggerAna_")==0){
+      size_t p=n.find('_',12); if(p!=std::string::npos)
+        runs.insert(std::atoi(n.substr(12, p-12).c_str()));
     }
+  }
+  closedir(d);
+  if(runs.empty()){ std::cerr<<C_RED<<"[FATAL] no runs"<<C_RST<<"\n"; return 3; }
 
-    // create brand-new output
-    TFile *fout = TFile::Open(scaledFile.c_str(), "RECREATE");
-    if (!fout || fout->IsZombie())
-    {
-        std::cerr << ANSI_RED << "[ERROR] cannot create scaled output "
-                  << scaledFile << ANSI_RESET << std::endl;
-        if (fout) { fout->Close(); delete fout; }
-        fin->Close(); delete fin;
-        return false;
+  bool allOK=true;
+  for(int r: runs){
+    std::cout<<"\n"<<C_BLU<<"================ RUN "<<r<<" ==============="<<C_RST<<"\n";
+    if(!handleRun(r, inDir, outDir)) allOK=false;
+  }
+
+  // final file
+  if(allOK){
+    const std::string final=outDir+"/TriggerAnaFinal.root";
+    gSystem->Unlink(final.c_str());
+
+    TFileMerger fm; fm.OutputFile(final.c_str(),"RECREATE");
+    DIR* od=opendir(outDir.c_str());
+    while(auto* e=readdir(od)){
+      std::string n=e->d_name;
+      if(n.find("TriggerAna_")==0 && n.substr(n.size()-5)==".root"
+         && n!="TriggerAnaFinal.root")
+        fm.AddFile((outDir+"/"+n).c_str());
     }
-
-    // top-level copy & scale
-    copyAndScaleDirectory(fin, fout, folderScaleMap);
-
-    // close both
-    fout->Write();
-    fout->Close();
-    delete fout;
-
-    fin->Close();
-    delete fin;
-
-    // validate scaled
-    bool good = validate_root_file(scaledFile);
-    if (!good)
-    {
-        std::cerr << ANSI_RED << "[ERROR] scaled file " << scaledFile
-                  << " invalid." << ANSI_RESET << std::endl;
-        return false;
+    closedir(od);
+    if(!fm.Merge() || !validateRoot(final)){
+      std::cerr<<C_RED<<"[ERROR] final merge failed"<<C_RST<<"\n"; return 4;
     }
-    return true;
+    std::cout<<C_GRN<<"[SUCCESS] "<<final<<C_RST<<"\n";
+  }
+  return allOK?0:1;
 }
 
-// ------------------------------------------------------------------------
-// 8) The main function for a single run
-// ------------------------------------------------------------------------
-void mergeSegmentFilesForRuns(int runNumber)
-{
-    std::cout << "\n================ mergeSegmentFilesForRuns => run "
-              << runNumber << " ================\n";
-
-    // Example input and output directories
-    std::string baseDir  = "/sphenix/tg/tg01/bulk/jbennett/DirectPhotons/output/CALOout/";
-    std::string outputDir= "/sphenix/user/patsfan753/tutorials/tutorials/CaloDataAnaRun24pp/output/";
-
-    std::string runStr   = std::to_string(runNumber);
-    std::string runPath  = baseDir + runStr + "/";
-    std::string finalFile= outputDir + runStr + "_HistOutput.root";
-
-    // If finalFile already exists, skip
-    struct stat sb;
-    if (::stat(finalFile.c_str(), &sb)==0)
-    {
-        std::cout << "[INFO] Final file already exists " << finalFile
-                  << ", skipping.\n";
-        return;
-    }
-
-    // gather segment files
-    DIR *dir = opendir(runPath.c_str());
-    if (!dir)
-    {
-        std::cerr << "[ERROR] cannot open " << runPath << std::endl;
-        return;
-    }
-    std::vector<std::string> allSegments;
-    struct dirent *ent;
-    while ((ent=readdir(dir)))
-    {
-        std::string fn = ent->d_name;
-        if (fn.find(".root") != std::string::npos)
-            allSegments.push_back(runPath + fn);
-    }
-    closedir(dir);
-
-    if (allSegments.empty())
-    {
-        std::cerr << "[WARNING] no .root segments found in "
-                  << runPath << std::endl;
-        return;
-    }
-
-    // check for zombie
-    std::vector<std::string> validSegments;
-    std::ofstream problemList("problematicHaddRuns.txt", std::ios::app);
-
-    for (auto & seg : allSegments)
-    {
-        TFile *tf = TFile::Open(seg.c_str(), "READ");
-        if (!tf || tf->IsZombie())
-        {
-            std::cerr << "[ERROR] problem file: " << seg << std::endl;
-            if (problemList.is_open())
-                problemList << runNumber << " " << seg << "\n";
-            if (tf) { tf->Close(); delete tf; }
-            continue;
-        }
-        validSegments.push_back(seg);
-        tf->Close(); delete tf;
-    }
-
-    if (validSegments.empty())
-    {
-        std::cerr << "[WARNING] no valid segments for run "
-                  << runNumber << std::endl;
-        return;
-    }
-
-    // step1: merge => "merged_tmp.root"
-    std::string mergedTmp = outputDir + runStr + "_merged_tmp.root";
-    bool mergedOK = doSegmentMerge(validSegments, mergedTmp);
-    if (!mergedOK)
-    {
-        std::cerr << ANSI_RED << "[ERROR] merging segments failed for run "
-                  << runNumber << ANSI_RESET << std::endl;
-        return;
-    }
-
-    // step2: scale => "scaled_tmp.root"
-    std::string scaledTmp = outputDir + runStr + "_scaled_tmp.root";
-    bool scaledOK = scaleMergedFile(mergedTmp, scaledTmp, runNumber);
-    if (!scaledOK)
-    {
-        std::cerr << ANSI_RED << "[ERROR] scaling failed for run "
-                  << runNumber << ANSI_RESET << std::endl;
-        ::remove(mergedTmp.c_str());
-        return;
-    }
-
-    // If that is good, rename scaled => final
-    int renameRet = std::rename(scaledTmp.c_str(), finalFile.c_str());
-    if (renameRet!=0)
-    {
-        perror("[ERROR] rename failed");
-        std::cerr << ANSI_RED << "Please rename " << scaledTmp << " => "
-                  << finalFile << " manually." << ANSI_RESET << std::endl;
-        return;
-    }
-
-    // Optionally remove mergedTmp if you want
-    ::remove(mergedTmp.c_str());
-
-    std::cout << ANSI_GREEN << "[SUCCESS] final scaled file => "
-              << finalFile << ANSI_RESET << std::endl;
-}
+// ── Entry points ------------------------------------------------------------
+#ifdef __CLING__              // ROOT macro
+int mergeSegmentsForRun(){ return driver(); }
+#else                          // standalone
+int main(){ return driver(); }
+#endif
