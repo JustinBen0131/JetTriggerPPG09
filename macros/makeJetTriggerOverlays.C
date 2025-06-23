@@ -23,6 +23,12 @@
 
 bool enableFits = true; // Set to true if you want to enable the fits
 
+const std::array<std::pair<const char*,const char*>,2> kJetRadii =
+{ { {"r03", "_r03"}, {"r05", "_r05"} } };
+
+static const std::string kInputRunDir = "/Users/patsfan753/Desktop/JetTriggerPPG09/output";
+static const std::string kOutputDir = "/Users/patsfan753/Desktop/JetTriggerPPG09/plotOutput";
+
 
 std::map<std::set<std::string>, DataStructures::RunInfo>
 AnalyzeWhatTriggerGroupsAvailable(
@@ -542,9 +548,8 @@ void ProcessRunsForCombination(
 
     // Loop over each run in this combination
     for (int runNumber : runs) {
-        std::stringstream ss;
-        ss << outputDirectory << "/" << runNumber << "_HistOutput.root";
-        std::string runRootFilePath = ss.str();
+        std::string runRootFilePath =
+            kInputRunDir + "/TriggerAna_" + std::to_string(runNumber) + ".root";
 
         std::cout << "\nProcessing run: " << runNumber
                   << ", file: " << runRootFilePath << std::endl;
@@ -808,7 +813,9 @@ static std::string buildSortedCombinationName(const std::set<std::string>& trigg
     // We'll gather all triggers except "MBD_NandS_geq_1" in a vector
     // Then parse their threshold and sort them ascending.
     std::vector<std::string> otherTriggers;
-    otherTriggers.reserve(triggers.size() - 1);
+    if (triggers.size() > 1) {
+        otherTriggers.reserve(triggers.size() - 1);
+    }
 
     for (const auto& trig : triggers) {
         if (trig == "MBD_NandS_geq_1") {
@@ -1089,8 +1096,8 @@ void PlotRunByRunHistograms(
             if (globalIdx >= totalRuns) break;
 
             const int        run   = runNumbers[globalIdx];
-            const std::string fInp = outputDirectory + "/" +
-                                     std::to_string(run) + "_HistOutput.root";
+            const std::string fInp = kInputRunDir + "/TriggerAna_" +
+                                     std::to_string(run) + ".root";
 
             std::unique_ptr<TFile> fin( TFile::Open(fInp.c_str(),"READ") );
             if (!fin || fin->IsZombie()) { std::cerr<<"[WARN] cannot open "<<fInp<<"\n"; continue; }
@@ -1197,8 +1204,8 @@ void PlotRunByRunHistograms(
     // =========================================================================
     for (int run : runNumbers)
     {
-        const std::string fInp = outputDirectory + "/" +
-                                 std::to_string(run) + "_HistOutput.root";
+        const std::string fInp = kInputRunDir + "/TriggerAna_" +
+                                 std::to_string(run) + ".root";
 
         std::unique_ptr<TFile> fin( TFile::Open(fInp.c_str(),"READ") );
         if (!fin || fin->IsZombie()) { std::cerr<<"[WARN] cannot open "<<fInp<<"\n"; continue; }
@@ -2104,8 +2111,7 @@ void PlotCombinedHistograms(
         combinationName += firmwareTag;
 
         /* plot directory ------------------------------------------------------ */
-        const std::string plotDir =
-            "/Users/patsfan753/Desktop/DirectPhotonAna/Plots_v2/" + combinationName;
+        const std::string plotDir = kOutputDir + "/" + combinationName;
         gSystem->mkdir(plotDir.c_str(),true);
 
         // ========================================================== 1. photons

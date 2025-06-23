@@ -1,12 +1,48 @@
 #ifndef MAKEJETTRIGGEROVERLAYS_H
 #define MAKEJETTRIGGEROVERLAYS_H
 
+// ------------------------------------------------------------------
+//  C++ STD headers
+// ------------------------------------------------------------------
+
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>      // << std::fixed, std::setprecision
+#include <regex>        // std::regex, std::smatch
+#include <array>
 #include <vector>
 #include <string>
 #include <map>
+#include <set>
+#include <utility>
 #include <algorithm>
-#include <cctype>
+#include <memory>
 
+// ------------------------------------------------------------------
+//  ROOT headers
+// ------------------------------------------------------------------
+#include "TROOT.h"
+#include "TSystem.h"     // gSystem, TSystem
+#include "TFile.h"
+#include "TDirectory.h"
+#include "TKey.h"
+#include "TCollection.h"
+#include "TH1.h"
+#include "TH2.h"
+#include "TProfile.h"
+#include "TF1.h"
+#include "TMath.h"
+#include "TCanvas.h"
+#include "TPad.h"
+#include "TLegend.h"
+#include "TLatex.h"
+#include "TLine.h"
+#include "TColor.h"
+#include "TCollection.h"     // ← you added this earlier for TIter
+#include "TFitResult.h"      // ← NEW: provides full TFitResult class
+#include "TFitResultPtr.h"   // inline dtor / operators for TFitResultPtr
 
 
 // Define CutValues, FitParameters, and HistogramData within a dedicated namespace
