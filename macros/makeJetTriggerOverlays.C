@@ -771,34 +771,106 @@ void ProcessRunsForCombination(
         std::cerr << "[ERROR] Failed to write " << validRunsFilePath << "\n";
     }
     
-    // --- NEW DIFF PRINT SECTION ---
-    //  At this point, 'runs' is the full list from the CSV
-    //  and 'validRuns' is what actually ended up merged.
-    //  Here we print out which runs were excluded (if any).
+    // ────────────────────────────────────────────────────────────────────
+    //  BEAUTIFIED RUN-SUMMARY  (before / after FW split)
+    // ────────────────────────────────────────────────────────────────────
     {
-        std::set<int> allRunsSet(runs.begin(), runs.end());
-        std::set<int> validRunsSet(validRuns.begin(), validRuns.end());
+        using std::setw;
+        constexpr int kRunsPerRow = 10;               // how many run IDs per line
+        constexpr int kFW_RUN     = 47289;            // firmware pivot run
+        const std::string kSep(98, '=');
 
-        std::vector<int> excludedRuns;
-        std::set_difference(allRunsSet.begin(),
-                            allRunsSet.end(),
-                            validRunsSet.begin(),
-                            validRunsSet.end(),
-                            std::back_inserter(excludedRuns));
+        /* helper to classify runs into “before” / “after” vectors --------- */
+        auto classify = [&](const std::vector<int>& src,
+                            std::vector<int>& before,
+                            std::vector<int>& after)
+        {
+            for (int rn : src)
+                (rn < kFW_RUN ? before : after).push_back(rn);
+        };
 
-        if (!excludedRuns.empty()) {
-            std::cout << "\n[DEBUG] For combination " << combinationName
-                      << ", the following runs were found in the CSV but NOT "
-                      << "included in the final ROOT file:\n   ";
-            for (int rn : excludedRuns) {
-                std::cout << rn << " ";
+        /* split the golden list and the merged list ----------------------- */
+        std::vector<int> goldenBefore, goldenAfter,
+                         validBefore,  validAfter;
+        classify(runs,       goldenBefore, goldenAfter);
+        classify(validRuns,  validBefore,  validAfter);
+
+        /* build skipped lists (golden – valid) --------------------------- */
+        auto diff = [](const std::vector<int>& a,
+                       const std::vector<int>& b)
+        {
+            std::vector<int> out;
+            std::set_difference(a.begin(), a.end(),
+                                b.begin(), b.end(),
+                                std::back_inserter(out));
+            return out;
+        };
+        std::vector<int> skippedBefore = diff(goldenBefore, validBefore);
+        std::vector<int> skippedAfter  = diff(goldenAfter,  validAfter);
+
+        /* nice coloured banner ------------------------------------------ */
+        std::cout << '\n'
+                  << CYAN  << BOLD << kSep << RESET << '\n'
+                  << CYAN  << BOLD << "Run-by-Run Merge Summary  →  "
+                  << combinationName << '\n'
+                  << CYAN  << BOLD << kSep << RESET << "\n\n";
+
+        /* little lambda for a one-line stat row ------------------------- */
+        auto statRow = [&](const char* era,
+                           std::size_t tot, std::size_t ok, std::size_t miss)
+        {
+            std::cout << MAGENTA << BOLD
+                      << setw(9)  << std::left  << era << RESET << "  "
+                      << BLUE   << BOLD << setw(6) << tot  << RESET << "  "
+                      << GREEN  << BOLD << setw(6) << ok   << RESET << "  "
+                      << YELLOW << BOLD << setw(6) << miss << RESET << '\n';
+        };
+
+        /* table header -------------------------------------------------- */
+        std::cout << BOLD << setw(9) << "Era"
+                  << setw(8) << "CSV"
+                  << setw(8) << "Merged"
+                  << setw(8) << "Skipped" << RESET << '\n'
+                  << kSep << '\n';
+
+        /* rows ---------------------------------------------------------- */
+        if (!goldenBefore.empty() || !validBefore.empty())
+            statRow("Before", goldenBefore.size(),
+                             validBefore.size(),
+                             skippedBefore.size());
+        if (!goldenAfter.empty()  || !validAfter.empty())
+            statRow("After",  goldenAfter.size(),
+                             validAfter.size(),
+                             skippedAfter.size());
+
+        std::cout << '\n';
+
+        /* detailed skipped lists --------------------------------------- */
+        auto prettyPrintRuns = [&](const char* title,
+                                   const std::vector<int>& vec,
+                                   const char* colour)
+        {
+            if (vec.empty()) return;
+            std::cout << colour << BOLD << title << RESET << '\n';
+            for (std::size_t i = 0; i < vec.size(); ++i) {
+                std::cout << colour << setw(8) << vec[i] << RESET;
+                if ((i + 1) % kRunsPerRow == 0 || i + 1 == vec.size())
+                    std::cout << '\n';
             }
-            std::cout << "\n";
-        } else {
-            std::cout << "\n[DEBUG] All runs for combination " << combinationName
-                      << " were successfully included in the final ROOT file.\n";
-        }
+            std::cout << '\n';
+        };
+
+        prettyPrintRuns("Skipped (Before FW):", skippedBefore, RED);
+        prettyPrintRuns("Skipped (After  FW):", skippedAfter,  RED);
+
+        if (skippedBefore.empty() && skippedAfter.empty())
+            std::cout << GREEN << BOLD
+                      << "✓  All golden runs were included in the ROOT file."
+                      << RESET << "\n\n";
+
+        std::cout << CYAN << BOLD << kSep << RESET << "\n";
     }
+
     // zeroDataFile closes automatically when function ends
 }
 
@@ -2068,18 +2140,6 @@ void PlotCombinedHistograms(
         {"_NewTriggerFilling_doNotScale", "doNotScale"}
     }};
 
-    // photon prefix (unchanged) ---------------------------------------------
-    std::string photPrefix, xTitlePhot;
-    if (histogramType == "maxEnergy") {
-        photPrefix   = "h_maxEnergyClus_NewTriggerFilling_doNotScale_";
-        xTitlePhot   = "Maximum Cluster Energy [GeV]";
-    } else {
-        photPrefix   = "h8by8TowerEnergySum_";
-        xTitlePhot   = "Maximum 8×8 EMCal Tower‑Sum [GeV]";
-    }
-    std::string photPrefixFile = photPrefix;
-    if (!photPrefixFile.empty() && photPrefixFile.back()=='_') photPrefixFile.pop_back();
-
     // =================================================================== file loop
     for (const std::string& rootFileName : combinedRootFiles)
     {
@@ -2113,36 +2173,6 @@ void PlotCombinedHistograms(
         /* plot directory ------------------------------------------------------ */
         const std::string plotDir = kOutputDir + "/" + combinationName;
         gSystem->mkdir(plotDir.c_str(),true);
-
-        // ========================================================== 1. photons
-        {
-            TCanvas c("cPhot","Photon overlay",800,600); c.SetLogy();
-            TLegend leg(0.55,0.60,0.88,0.88); leg.SetTextSize(0.03);
-            bool first = true;
-
-            for (const std::string& trg : triggers)
-            {
-                if (trg.rfind("Jet_",0)==0) continue;  // skip jet triggers
-
-                if (TDirectory* dir = inFile->GetDirectory(trg.c_str()))
-                {
-                    if (auto* h = dynamic_cast<TH1*>( dir->Get((photPrefix+trg).c_str()) ))
-                    {
-                        auto* hc = static_cast<TH1*>( h->Clone() ); hc->SetDirectory(nullptr);
-                        int col  = (trigColor.count(trg)?trigColor.at(trg):kBlack);
-
-                        hc->SetLineColor(col); hc->SetLineWidth(2);
-                        hc->GetXaxis()->SetTitle(xTitlePhot.c_str());
-                        hc->GetYaxis()->SetTitle("Prescaled Counts");
-                        (first?hc->Draw("hist"):hc->Draw("hist same"));
-                        first=false;
-                        leg.AddEntry(hc, pretty(trg).c_str(),"l");
-                    }
-                }
-            }
-            leg.Draw();
-            c.SaveAs( (plotDir+"/"+photPrefixFile+"_Overlay.png").c_str() );
-        }
 
         // ============================================================ 2. jets
         std::vector<std::string> jetTrigList;
